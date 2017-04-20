@@ -3,6 +3,7 @@ from collections import namedtuple
 import argparse
 
 import cv2
+import h5py
 import numpy as np
 import scipy.spatial
 
@@ -14,17 +15,17 @@ Observation = namedtuple("Observation", "frame_nr, pt")
 
 class Track:
     def __init__(self):
-        self._observations = []
+        self.observations = []
         self._frame_obs_map = {}
 
     def add_observation(self, frame_nr, pt):
         obs = Observation(frame_nr, pt)
-        self._observations.append(obs)
+        self.observations.append(obs)
         self._frame_obs_map[frame_nr] = obs
 
     def keep_only_to(self, frame_nr):
         "Keep only observations up to and including frame_nr"
-        self._observations = [obs for obs in self._observations if obs.frame_nr <= frame_nr]
+        self.observations = [obs for obs in self.observations if obs.frame_nr <= frame_nr]
 
     @property
     def length(self):
@@ -39,15 +40,15 @@ class Track:
 
     @property
     def start(self):
-        return self._observations[0].frame_nr
+        return self.observations[0].frame_nr
 
     @property
     def end(self):
-        return self._observations[-1].frame_nr
+        return self.observations[-1].frame_nr
 
     @property
     def last(self):
-        return self._observations[-1]
+        return self.observations[-1]
 
     def __getitem__(self, frame_nr):
         return self._frame_obs_map[frame_nr]
@@ -238,6 +239,25 @@ def video_frames(path, low=0, high=None):
             yield frame_nr, image
 
 
+def save_tracks_hdf5(tracker, path):
+    with h5py.File(path, 'w') as f:
+        trackg = f.create_group('tracks')
+        for i, t in enumerate(tracker.tracks):
+            g = trackg.create_group(str(i))
+            frames = [o.frame_nr for o in t.observations]
+            points = np.vstack([o.pt for o in t.observations])
+            g['frames'] = frames
+            g['points'] = points
+
+        trackg['backtrack_length'] = tracker.backtrack_length
+        trackg['min_distance'] = tracker.min_distance
+        trackg['min_points'] = tracker.min_points
+        trackg['min_length'] = tracker.min_track_length
+
+OUTPUT_HANDLERS = {
+    '.h5': save_tracks_hdf5,
+    '.hdf5': save_tracks_hdf5
+}
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -249,6 +269,7 @@ if __name__ == "__main__":
     parser.add_argument('--min-distance', type=int, default=5, help='Minimum distance (pixels) when creating new points')
     parser.add_argument('--start', type=int, default=0, help='Starting frame (first frame is 0)')
     parser.add_argument('--end', type=int, default=None, help='Ending frame')
+    parser.add_argument('--overwrite', action='store_true', help='Overwrite output if it exists')
     args = parser.parse_args()
 
     tracker = TrackRetrack(min_track_length=args.min_length,
@@ -256,10 +277,23 @@ if __name__ == "__main__":
                            min_points=args.min_points,
                            min_distance=args.min_distance)
 
-    path = os.path.expanduser(args.videofile)
+    in_path = os.path.expanduser(args.videofile)
+    out_path = os.path.expanduser(args.output)
+
+    if os.path.exists(out_path) and not args.overwrite:
+        parser.error("Output file '{}' already exists".format(out_path))
+
+    _, extension = os.path.splitext(out_path)
     try:
-        for frame_nr, im in video_frames(path, args.start, args.end):
-            print(frame_nr)
+
+        output_handler = OUTPUT_HANDLERS[extension]
+    except KeyError:
+        parser.error("No output handler for extension '{}'. Available handlers exist for: {}".format(
+            extension, ", ".join(OUTPUT_HANDLERS.keys())
+        ))
+
+    try:
+        for frame_nr, im in video_frames(in_path, args.start, args.end):
             tracker.update(frame_nr, im)
 
             import matplotlib.pyplot as plt
@@ -276,5 +310,6 @@ if __name__ == "__main__":
     except (IOError, OSError) as e:
         parser.error(e)
 
-    print('Finalize')
     tracker.finalize()
+    output_handler(tracker, out_path)
+    print('Wrote {:d} tracks to {}'.format(len(tracker.tracks), out_path))
