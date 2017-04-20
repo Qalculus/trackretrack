@@ -270,7 +270,14 @@ if __name__ == "__main__":
     parser.add_argument('--start', type=int, default=0, help='Starting frame (first frame is 0)')
     parser.add_argument('--end', type=int, default=None, help='Ending frame')
     parser.add_argument('--overwrite', action='store_true', help='Overwrite output if it exists')
+    parser.add_argument('--visualize', action='store_true', help='Plot tracks while tracking')
     args = parser.parse_args()
+
+    if args.visualize:
+        try:
+            import matplotlib.pyplot as plt
+        except ImportError:
+            parser.error("Visualization requires matplotlib")
 
     tracker = TrackRetrack(min_track_length=args.min_length,
                            backtrack_length=args.backtrack_length,
@@ -296,8 +303,7 @@ if __name__ == "__main__":
         for frame_nr, im in video_frames(in_path, args.start, args.end):
             tracker.update(frame_nr, im)
 
-            import matplotlib.pyplot as plt
-            if frame_nr >= 2:
+            if args.visualize:
                 cur_frame_nr, cur_frame = tracker._frame_queue[-1]
 
                 plt.clf()
