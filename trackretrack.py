@@ -7,6 +7,50 @@ import h5py
 import numpy as np
 import scipy.spatial
 
+try:
+    import progressbar
+
+    class Progressbar:
+        def __init__(self, _min, _max):
+            self._min = _min
+
+            self._indeterminate = _max is None
+
+            widgets = [
+                'Frame ', progressbar.Counter(), ' ',
+                progressbar.Timer(),
+                ' ', progressbar.Bar(initial_value=_min), # Placeholder
+                ' ', progressbar.AdaptiveTransferSpeed(unit='frames'), ' ',
+                progressbar.AdaptiveETA()
+            ]
+            self._bar_index = 5
+
+            if self._indeterminate:
+                widgets[self._bar_index] = progressbar.AnimatedMarker()
+                self.pbar = progressbar.ProgressBar(max_value=progressbar.UnknownLength, widgets=widgets)
+            else:
+                if _min > 0:
+                    # Start indeterminate and switch when we reach min
+                    widgets[self._bar_index] = progressbar.AnimatedMarker()
+                self.pbar = progressbar.ProgressBar(max_value=_max, widgets=widgets)
+            self.pbar.start()
+
+        def update(self, frame_nr):
+            if not self._indeterminate and frame_nr > self.pbar.max_value:
+                return
+
+            if not self._indeterminate and frame_nr == self._min:
+                self.pbar.widgets[self._bar_index] = progressbar.Bar()
+            self.pbar.update(frame_nr)
+
+except ImportError:
+    class Progressbar:
+        def __init__(self, min, max):
+            pass
+
+        def update(self, frame_nr):
+            pass
+
 Observation = namedtuple("Observation", "frame_nr, pt")
 
 # Assumptions:
@@ -228,11 +272,18 @@ def video_frames(path, low=0, high=None):
     if not os.path.exists(path):
         raise OSError("Videofile '{}' does not exist".format(path))
     vc = cv2.VideoCapture(path)
+
+    pbar = Progressbar(low, high)
+
     for frame_nr, _ in enumerate(iter(int, 1)):  # iter(int, 1) is an infinite loop
         res, image = vc.read()
+
         if not res:
             break
-        elif frame_nr >= low:
+
+        pbar.update(frame_nr)
+
+        if frame_nr >= low:
             if high is not None and frame_nr > high:
                     break  # Previous frame was last frame
             # Frame was OK and within frame limits, return it
@@ -318,4 +369,5 @@ if __name__ == "__main__":
 
     tracker.finalize()
     output_handler(tracker, out_path)
+    print()
     print('Wrote {:d} tracks to {}'.format(len(tracker.tracks), out_path))
