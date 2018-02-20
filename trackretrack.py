@@ -1,11 +1,15 @@
 import os
+import re
 from collections import namedtuple
+import glob
 import argparse
 
 import cv2
 import h5py
 import numpy as np
 import scipy.spatial
+
+from anms import anms_sdc
 
 try:
     import progressbar
@@ -17,7 +21,7 @@ try:
             self._indeterminate = _max is None
 
             widgets = [
-                'Frame ', progressbar.Counter(), ' ',
+                'Frame ', progressbar.Counter(), ' ', progressbar.Percentage(), ' ',
                 progressbar.Timer(),
                 ' ', progressbar.Bar(initial_value=_min), # Placeholder
                 ' ', progressbar.AdaptiveTransferSpeed(unit='frames'), ' ',
@@ -100,12 +104,16 @@ class Track:
 
 NO_ARRAY = np.array([])
 
+debug_list = {}
+
 class TrackRetrack:
-    def __init__(self, backtrack_length=3, min_backtrack_distance=0.5, min_track_length=5, min_points=100, min_distance=8):
+    def __init__(self, backtrack_length=3, min_backtrack_distance=0.5, min_track_length=5, min_points=100,
+                 min_distance=8, winsize=11):
         if backtrack_length > min_track_length:
             raise ValueError("Minimum track length must be greater than or equal to backtrack length")
         self.backtrack_length = backtrack_length
         self.min_track_length = min_track_length
+        self.winsize = (winsize, winsize)
         self.min_points = min_points
         self.min_backtrack_distance = min_backtrack_distance
         self.min_distance = min_distance
@@ -134,12 +142,23 @@ class TrackRetrack:
         if len(self._active_tracks) < self.min_points:
             self._find_new_points()
 
+        if len(set(self._active_tracks)) < len(self._active_tracks):
+            raise ValueError("Active tracks contains duplicates")
+
+        if len(set(self.tracks)) < len(self.tracks):
+            raise ValueError("Stored track duplicates!")
+
     def _find_new_points(self):
         current_num_points = len(self._active_tracks)
         frame_nr, current_frame = self._frame_queue[-1]
         num_to_add = self.min_points - current_num_points
-        detector = cv2.GFTTDetector_create(maxCorners=num_to_add, minDistance=self.min_distance)
+        #detector = cv2.GFTTDetector_create(maxCorners=num_to_add, minDistance=self.min_distance)
+        detector = cv2.FastFeatureDetector_create(nonmaxSuppression=True, threshold=15)
         keypoints = detector.detect(current_frame)
+
+        # Non-max suppression
+        image_size = self._frame_queue[-1][1].shape[:2]
+        keypoints = anms_sdc(keypoints, self.min_points, image_size)
 
         if self._active_tracks:
             filtered_keypoints = []
@@ -164,7 +183,7 @@ class TrackRetrack:
         assert all(t.last.frame_nr == (frame_nr - 1) for t in self._active_tracks)
         prev_points = np.vstack([t.last.pt for t in self._active_tracks])
         prev_points = prev_points.reshape(1, -1, 2)
-        next_pts, status, *_ = cv2.calcOpticalFlowPyrLK(prev_frame, current_frame, prev_points, NO_ARRAY)
+        next_pts, status, *_ = cv2.calcOpticalFlowPyrLK(prev_frame, current_frame, prev_points, NO_ARRAY, winSize=self.winsize)
         next_pts = next_pts[0] # Squeeze first dimension
 
         new_active = []
@@ -187,6 +206,9 @@ class TrackRetrack:
         current_frame_nr, _ = self._frame_queue[-1]
         active = []
         for (frame_from_nr, frame_from), (frame_to_nr, frame_to) in zip(self._frame_queue[::-1], self._frame_queue[-2::-1]):
+            if len(set(active)) < len(active):
+                raise ValueError("Active contains duplicates")
+
             # Add tracks going in
             starting = [t for t in self._backtrack_queue
                         if t.last.frame_nr == frame_from_nr and not self.last_retrack(t) == frame_from_nr]
@@ -198,7 +220,17 @@ class TrackRetrack:
             for track in already_retracked:
                 track.keep_only_to(frame_from_nr)
                 if track.length >= self.min_track_length:
+                    if track in self.tracks:
+                        print([obs.frame_nr for obs in track.observations])
+                        print(frame_from_nr, frame_to_nr)
+                        print(self._current_frame_nr)
+                        print(self.last_retrack(track))
+                        print(track in self._backtrack_queue)
+                        print(track in already_retracked)
+                        print(track in self._active_tracks)
+                        raise ValueError("Adding existing track at First! which was added at {}".format(debug_list[track]))
                     self.tracks.append(track)
+                    debug_list[track] = ('First', frame_from_nr, self._current_frame_nr)
 
             if not active:
                 continue
@@ -206,7 +238,7 @@ class TrackRetrack:
             # Track
             prev_points = np.vstack([t[frame_from_nr].pt for t in active])
             prev_points = prev_points.reshape(1, -1, 2)
-            next_points, status, *_ = cv2.calcOpticalFlowPyrLK(frame_from, frame_to, prev_points, NO_ARRAY)
+            next_points, status, *_ = cv2.calcOpticalFlowPyrLK(frame_from, frame_to, prev_points, NO_ARRAY, winSize=self.winsize)
 
             new_active = []
             for track, new_pt, st in zip(active, next_points[0], status):
@@ -217,7 +249,11 @@ class TrackRetrack:
                         if track in self._active_tracks:
                             self._last_retrack[track] = current_frame_nr # Still forward tracking
                         elif track.length >= self.min_track_length:
+                            if track in self.tracks:
+                                raise ValueError("Adding existing track at Second! which was added at {}".format(debug_list[track]))
+
                             self.tracks.append(track) # Track has ended but backtracked OK all the way
+                            debug_list[track] = ('Second', frame_from_nr, self._current_frame_nr)
                     else:
                         new_active.append(track) # Should be retracked further
                 else: # Failed to backtrack
@@ -225,9 +261,17 @@ class TrackRetrack:
                         last_retrack = self._last_retrack[track]
                         track.keep_only_to(last_retrack)
                         if track.length >= self.min_track_length:
+                            if track in self.tracks:
+                                raise ValueError("Adding existing track at Third! which was added at {}".format(debug_list[track]))
                             self.tracks.append(track)
+                            debug_list[track] = ('Third', frame_from_nr, self._current_frame_nr)
                     except KeyError:
                         pass # Retrack failed, and no old valid data -> track dies
+
+                    try:
+                        self._backtrack_queue.remove(track)
+                    except ValueError:
+                        pass # It might be removed already
 
                     try:
                         self._active_tracks.remove(track)
@@ -267,6 +311,36 @@ class TrackRetrack:
             self._active_tracks.clear()
             self._backtrack()
 
+def directory_frames(path, low=0, high=None):
+    FILE_REGEXP = re.compile(r'\S*?(\d+)\.\S+')
+    for extension in ['.png', '.jpg']:
+        files = [f for f in glob.glob(os.path.join(path, '*' + extension)) if FILE_REGEXP.match(f)]
+        if files:
+            break
+
+    if not files:
+        raise ValueError("Directory contains no valid frames")
+
+    def parse_frame_nr(f):
+        return int(FILE_REGEXP.match(f).groups()[0])
+
+    files.sort(key=parse_frame_nr)
+
+    max_framenr = parse_frame_nr(files[-1])
+    if high is None:
+        high = max_framenr
+    else:
+        high = min(high, max_framenr)
+
+    pbar = Progressbar(low, high)
+
+    for f in files:
+        frame_nr = parse_frame_nr(f)
+        if low <= frame_nr <= high:
+            img = cv2.imread(f, cv2.IMREAD_COLOR)
+            pbar.update(frame_nr)
+            yield frame_nr, img
+
 
 def video_frames(path, low=0, high=None):
     if not os.path.exists(path):
@@ -300,10 +374,10 @@ def save_tracks_hdf5(tracker, path):
             g['frames'] = frames
             g['points'] = points
 
-        trackg['backtrack_length'] = tracker.backtrack_length
-        trackg['min_distance'] = tracker.min_distance
-        trackg['min_points'] = tracker.min_points
-        trackg['min_length'] = tracker.min_track_length
+        f['backtrack_length'] = tracker.backtrack_length
+        f['min_distance'] = tracker.min_distance
+        f['min_points'] = tracker.min_points
+        f['min_length'] = tracker.min_track_length
 
 OUTPUT_HANDLERS = {
     '.h5': save_tracks_hdf5,
@@ -318,6 +392,7 @@ if __name__ == "__main__":
     parser.add_argument('--backtrack-length', type=int, default=3, help='Number of frames to track back')
     parser.add_argument('--min-points', type=int, default=100, help='Minimum number of points to keep alive per frame')
     parser.add_argument('--min-distance', type=int, default=5, help='Minimum distance (pixels) when creating new points')
+    parser.add_argument('--winsize', type=int, default=21, help='LK tracker block size')
     parser.add_argument('--start', type=int, default=0, help='Starting frame (first frame is 0)')
     parser.add_argument('--end', type=int, default=None, help='Ending frame')
     parser.add_argument('--overwrite', action='store_true', help='Overwrite output if it exists')
@@ -333,7 +408,8 @@ if __name__ == "__main__":
     tracker = TrackRetrack(min_track_length=args.min_length,
                            backtrack_length=args.backtrack_length,
                            min_points=args.min_points,
-                           min_distance=args.min_distance)
+                           min_distance=args.min_distance,
+                           winsize=args.winsize)
 
     in_path = os.path.expanduser(args.videofile)
     out_path = os.path.expanduser(args.output)
@@ -350,8 +426,15 @@ if __name__ == "__main__":
             extension, ", ".join(OUTPUT_HANDLERS.keys())
         ))
 
+    if os.path.isdir(in_path):
+        print('Loading frames from directory', in_path)
+        frame_func = directory_frames
+    else:
+        print('Loading frames from video file', in_path)
+        frame_func = video_frames
+
     try:
-        for frame_nr, im in video_frames(in_path, args.start, args.end):
+        for frame_nr, im in frame_func(in_path, args.start, args.end):
             tracker.update(frame_nr, im)
 
             if args.visualize:
