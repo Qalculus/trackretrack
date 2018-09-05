@@ -7,7 +7,7 @@ setup(
     author='Hannes Ovrén',
     author_email='hannes.ovren@liu.se',
     license='MIT',
-    py_modules=['trackretrack', 'anms'],
+    packages=['trackretrack'],
 
     entry_points={
         'console_scripts': [

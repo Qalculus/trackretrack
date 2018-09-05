@@ -9,7 +9,7 @@ import h5py
 import numpy as np
 import scipy.spatial
 
-from anms import anms_sdc
+from .anms import anms_sdc
 
 try:
     import progressbar
